@@ -8,6 +8,11 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1E474B">
 <style>
   :root{
     --teal:#1E474B;
@@ -236,6 +241,18 @@
       <div class="big" id="summary-pct">0%</div>
     </div>
     <div class="progress-track"><div class="progress-fill" id="summary-fill" style="width:0%"></div></div>
+    <div class="hint" id="data-warnings" style="display:none;color:var(--amber);margin-top:10px;"></div>
+  </div>
+
+  <div class="card" id="suggestion-card" style="display:none;">
+    <div style="font-size:13px;color:var(--text-muted);font-weight:500;margin-bottom:4px;">Javasolt következő cél</div>
+    <a href="#" id="suggestion-link" class="village-link" style="font-size:18px;"></a>
+  </div>
+
+  <div class="card">
+    <div style="font-size:13px;color:var(--text-muted);font-weight:500;margin-bottom:10px;">Napi haladás</div>
+    <canvas id="daily-chart" height="90"></canvas>
+    <div class="hint" id="estimate-line" style="margin-top:12px;"></div>
   </div>
 
   <div class="card">
@@ -252,7 +269,7 @@
   <div class="card">
     <table id="village-table">
       <thead>
-        <tr><th>Falu</th><th>Cél</th><th>Kész</th><th>%</th><th></th></tr>
+        <tr><th>Falu</th><th>Cél</th><th>Kész</th><th id="sort-pct-th" style="cursor:pointer;">% <span id="sort-arrow"></span></th><th></th></tr>
       </thead>
       <tbody id="village-tbody"></tbody>
     </table>
@@ -283,6 +300,7 @@
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <script>
 const STORAGE_FALVAK = 'cwt_tracker_falvak_url';
 const STORAGE_DROPS = 'cwt_tracker_drops_url';
@@ -292,9 +310,17 @@ const DEFAULT_DROPS_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQMo_
 
 let map, villageLayer = L.layerGroup(), dropLayer = L.layerGroup(), routeLayer = L.layerGroup();
 let villageMarkers = {};
+let dropMarkers = [];
 let hasFitBounds = false;
 let lastDataSignature = '';
+let lastVillages = [];
+let sortDir = null;
+let dailyChart = null;
+let suggestedVillageName = null;
 const POLL_MS = 60000;
+const OUTLIER_KM = 3;
+const OVERPASS_CACHE_PREFIX = 'cwt_overpass_cache_';
+const OVERPASS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function initMap(){
   map = L.map('map', {scrollWheelZoom:false}).setView([47.20, 16.13], 12);
@@ -352,15 +378,19 @@ function haversine(lat1,lon1,lat2,lon2){
 async function renderRoute(routePoints){
   routeLayer.clearLayers();
   if(!routePoints.length) return;
-  let drewStreets = false;
+  let result = { drewAny:false, streetNames:new Array(routePoints.length).fill(null) };
   try{
-    drewStreets = await colorCoveredStreets(routePoints);
+    result = await colorCoveredStreets(routePoints);
   }catch(e){
-    drewStreets = false;
+    result = { drewAny:false, streetNames:new Array(routePoints.length).fill(null) };
   }
-  if(!drewStreets){
+  if(!result.drewAny){
     drawFallbackRoute(routePoints);
   }
+  dropMarkers.forEach((dm,i) => {
+    const name = result.streetNames[i];
+    if(name) dm.marker.setPopupContent(`<strong>${name}</strong>`);
+  });
 }
 
 function drawFallbackRoute(routePoints){
@@ -393,8 +423,49 @@ function distPointToSegment(px,py,ax,ay,bx,by){
   return Math.hypot(px-cx, py-cy);
 }
 
+function cleanOverpassCache(){
+  try{
+    const now = Date.now();
+    Object.keys(localStorage).forEach(k => {
+      if(!k.startsWith(OVERPASS_CACHE_PREFIX)) return;
+      try{
+        const entry = JSON.parse(localStorage.getItem(k));
+        if(!entry || now - entry.ts > OVERPASS_CACHE_TTL_MS) localStorage.removeItem(k);
+      }catch(e){ localStorage.removeItem(k); }
+    });
+  }catch(e){}
+}
+
+async function fetchOverpassWays(minLat,minLon,maxLat,maxLon){
+  const cacheKey = OVERPASS_CACHE_PREFIX + [minLat,minLon,maxLat,maxLon].map(n=>n.toFixed(3)).join('_');
+  try{
+    const cachedRaw = localStorage.getItem(cacheKey);
+    if(cachedRaw){
+      const cached = JSON.parse(cachedRaw);
+      if(Date.now() - cached.ts < OVERPASS_CACHE_TTL_MS) return cached.ways;
+    }
+  }catch(e){}
+
+  const query = `[out:json][timeout:20];way["highway"](${minLat},${minLon},${maxLat},${maxLon});out geom;`;
+  const res = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST',
+    body: 'data=' + encodeURIComponent(query)
+  });
+  if(!res.ok) throw new Error('Overpass hiba');
+  const data = await res.json();
+  const ways = (data.elements||[]).filter(el => el.type==='way' && el.geometry && el.geometry.length>1);
+
+  try{
+    cleanOverpassCache();
+    localStorage.setItem(cacheKey, JSON.stringify({ts:Date.now(), ways}));
+  }catch(e){}
+
+  return ways;
+}
+
 async function colorCoveredStreets(routePoints){
-  if(!routePoints.length) return false;
+  const result = { drewAny:false, streetNames:new Array(routePoints.length).fill(null) };
+  if(!routePoints.length) return result;
   let minLat=90, maxLat=-90, minLon=180, maxLon=-180;
   routePoints.forEach(p => {
     if(p.lat<minLat) minLat=p.lat;
@@ -405,45 +476,44 @@ async function colorCoveredStreets(routePoints){
   const buf = 0.003;
   minLat-=buf; maxLat+=buf; minLon-=buf; maxLon+=buf;
 
-  const query = `[out:json][timeout:20];way["highway"](${minLat},${minLon},${maxLat},${maxLon});out geom;`;
-  const res = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    body: 'data=' + encodeURIComponent(query)
-  });
-  if(!res.ok) throw new Error('Overpass hiba');
-  const data = await res.json();
-  const ways = (data.elements||[]).filter(el => el.type==='way' && el.geometry && el.geometry.length>1);
-  if(!ways.length) return false;
+  const ways = await fetchOverpassWays(minLat,minLon,maxLat,maxLon);
+  if(!ways.length) return result;
 
   const refLat = (minLat+maxLat)/2;
   const mPerDegLat = 111320;
   const mPerDegLon = 111320 * Math.cos(refLat*Math.PI/180);
   const toXY = (lat,lon) => [lon*mPerDegLon, lat*mPerDegLat];
   const ptsXY = routePoints.map(p => toXY(p.lat,p.lon));
+  const bestDist = new Array(routePoints.length).fill(Infinity);
   const THRESH = 20;
   const greenColor = getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
 
-  let drewAny = false;
   ways.forEach(way => {
     const nodesXY = way.geometry.map(n => toXY(n.lat,n.lon));
+    const wayName = way.tags && way.tags.name ? way.tags.name : null;
     for(let i=0; i<nodesXY.length-1; i++){
       const [ax,ay] = nodesXY[i], [bx,by] = nodesXY[i+1];
-      let covered = false;
-      for(const [px,py] of ptsXY){
-        if(distPointToSegment(px,py,ax,ay,bx,by) < THRESH){ covered = true; break; }
+      let segCovered = false;
+      for(let j=0; j<ptsXY.length; j++){
+        const [px,py] = ptsXY[j];
+        const d = distPointToSegment(px,py,ax,ay,bx,by);
+        if(d < THRESH){
+          segCovered = true;
+          if(d < bestDist[j]){ bestDist[j] = d; result.streetNames[j] = wayName; }
+        }
       }
-      if(covered){
+      if(segCovered){
         L.polyline([
           [way.geometry[i].lat, way.geometry[i].lon],
           [way.geometry[i+1].lat, way.geometry[i+1].lon]
         ], {
           color: greenColor, weight: 7, opacity: .5, lineCap: 'round', lineJoin: 'round'
         }).addTo(routeLayer);
-        drewAny = true;
+        result.drewAny = true;
       }
     }
   });
-  return drewAny;
+  return result;
 }
 
 function colorFor(pct){
@@ -458,58 +528,15 @@ async function fetchText(url){
   return res.text();
 }
 
-function render(falvak, drops){
-  villageLayer.clearLayers();
-  dropLayer.clearLayers();
-  routeLayer.clearLayers();
-
-  const villages = falvak.map(f => ({
-    nev: colFind(f,'falu','village','name'),
-    lat: parseFloat(colFind(f,'lat','latitude')),
-    lon: parseFloat(colFind(f,'lon','lng','longitude')),
-    cel: parseFloat(colFind(f,'cél','cel','target')) || 0,
-    kesz: 0
-  })).filter(v => v.nev && !isNaN(v.lat) && !isNaN(v.lon));
-
-  let totalKesz = 0;
-  const routePoints = [];
-
-  drops.forEach(d => {
-    const ort = colFind(d,'ort','hely','location');
-    const parts = ort.split(',').map(s=>parseFloat(s.trim()));
-    if(parts.length < 2 || isNaN(parts[0]) || isNaN(parts[1])) return;
-    const [lat, lon] = parts;
-    const count = parseFloat(colFind(d,'flyer','db','count')) || 1;
-    totalKesz += count;
-
-    const zeitStr = colFind(d,'zeit','ido','idő','time');
-    const t = Date.parse((zeitStr||'').replace(' ','T'));
-    routePoints.push({lat, lon, t});
-
-    L.circleMarker([lat,lon], {
-      radius:4, weight:1, color:'#fff', fillOpacity:.75,
-      fillColor: getComputedStyle(document.documentElement).getPropertyValue('--teal-mid').trim()
-    }).addTo(dropLayer);
-
-    if(villages.length){
-      let nearest = villages[0], best = Infinity;
-      villages.forEach(v => {
-        const dist = haversine(lat,lon,v.lat,v.lon);
-        if(dist < best){ best = dist; nearest = v; }
-      });
-      nearest.kesz += count;
-    }
-  });
-
-  renderRoute(routePoints);
-
+function renderVillageTable(villages){
   const tbody = document.getElementById('village-tbody');
   tbody.innerHTML = '';
   document.getElementById('table-empty').style.display = villages.length ? 'none' : 'block';
+  villageLayer.clearLayers();
   villageMarkers = {};
 
   const bounds = [];
-  villages.sort((a,b) => a.nev.localeCompare(b.nev,'hu')).forEach(v => {
+  villages.forEach(v => {
     const pct = v.cel > 0 ? Math.round((v.kesz / v.cel) * 100) : 0;
     const color = colorFor(pct);
     bounds.push([v.lat, v.lon]);
@@ -531,6 +558,160 @@ function render(falvak, drops){
   });
 
   if(bounds.length && !hasFitBounds){ map.fitBounds(bounds, {padding:[30,30]}); hasFitBounds = true; }
+}
+
+function renderDailyChart(dailyTotals){
+  const canvas = document.getElementById('daily-chart');
+  if(!canvas || typeof Chart === 'undefined') return;
+  const dates = Object.keys(dailyTotals).sort();
+  const values = dates.map(d => dailyTotals[d]);
+  const labels = dates.map(d => new Date(d+'T00:00:00').toLocaleDateString('hu-HU', {month:'numeric', day:'numeric'}));
+  if(dailyChart) dailyChart.destroy();
+  dailyChart = new Chart(canvas, {
+    type: 'bar',
+    data: { labels, datasets: [{
+      data: values,
+      backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--teal').trim(),
+      borderRadius: 4,
+      maxBarThickness: 28
+    }]},
+    options: {
+      responsive: true,
+      plugins: { legend:{display:false}, tooltip:{ callbacks:{ label:(c)=>c.parsed.y+' db' } } },
+      scales: { x:{ grid:{display:false} }, y:{ beginAtZero:true, ticks:{ precision:0 } } }
+    }
+  });
+}
+
+function renderEstimate(dailyTotals, totalKesz){
+  const el = document.getElementById('estimate-line');
+  if(!el) return;
+  const dates = Object.keys(dailyTotals).sort();
+  if(!dates.length || totalKesz <= 0){
+    el.textContent = 'Még nincs elég adat a becsléshez.';
+    return;
+  }
+  if(totalKesz >= TOTAL_TARGET){
+    el.textContent = 'Az összes szórólap kiosztva.';
+    return;
+  }
+  const first = new Date(dates[0]+'T00:00:00');
+  const last = new Date(dates[dates.length-1]+'T00:00:00');
+  const daySpan = Math.max(1, Math.round((last-first)/86400000)+1);
+  const perDay = totalKesz / daySpan;
+  if(perDay <= 0){
+    el.textContent = 'Még nincs elég adat a becsléshez.';
+    return;
+  }
+  const remaining = TOTAL_TARGET - totalKesz;
+  const daysLeft = Math.ceil(remaining / perDay);
+  const finishDate = new Date(last.getTime() + daysLeft*86400000);
+  el.textContent = `Jelenlegi tempó: ${perDay.toFixed(1)} db/nap. Ha így haladtok, kb. ${finishDate.toLocaleDateString('hu-HU')} körül végeztek az 5000 db-bal.`;
+}
+
+function updateSuggestion(villages){
+  const card = document.getElementById('suggestion-card');
+  const link = document.getElementById('suggestion-link');
+  const candidates = villages.filter(v => v.cel > 0 && (v.kesz/v.cel) < 1);
+  if(!candidates.length){
+    card.style.display = 'none';
+    suggestedVillageName = null;
+    return;
+  }
+  candidates.sort((a,b) => (a.kesz/a.cel) - (b.kesz/b.cel));
+  const best = candidates[0];
+  const pct = Math.round((best.kesz/best.cel)*100);
+  suggestedVillageName = best.nev;
+  link.textContent = `${best.nev} (${pct}%)`;
+  card.style.display = 'block';
+}
+
+function render(falvak, drops){
+  dropLayer.clearLayers();
+  routeLayer.clearLayers();
+  dropMarkers = [];
+
+  const rawFalvakCount = falvak.length;
+  const villages = falvak.map(f => ({
+    nev: colFind(f,'falu','village','name'),
+    lat: parseFloat(colFind(f,'lat','latitude')),
+    lon: parseFloat(colFind(f,'lon','lng','longitude')),
+    cel: parseFloat(colFind(f,'cél','cel','target')) || 0,
+    kesz: 0
+  })).filter(v => v.nev && !isNaN(v.lat) && !isNaN(v.lon));
+  const invalidVillageCount = rawFalvakCount - villages.length;
+
+  let totalKesz = 0;
+  let invalidDropCount = 0;
+  let duplicateCount = 0;
+  let outlierCount = 0;
+  const routePoints = [];
+  const dailyTotals = {};
+  const seenKeys = new Set();
+
+  drops.forEach(d => {
+    const ort = colFind(d,'ort','hely','location');
+    const zeitStr = colFind(d,'zeit','ido','idő','time');
+    const parts = ort.split(',').map(s=>parseFloat(s.trim()));
+    if(parts.length < 2 || isNaN(parts[0]) || isNaN(parts[1])){ invalidDropCount++; return; }
+
+    const dupKey = zeitStr + '|' + ort;
+    if(seenKeys.has(dupKey)){ duplicateCount++; return; }
+    seenKeys.add(dupKey);
+
+    const [lat, lon] = parts;
+    const count = parseFloat(colFind(d,'flyer','db','count')) || 1;
+    totalKesz += count;
+
+    const t = Date.parse((zeitStr||'').replace(' ','T'));
+    routePoints.push({lat, lon, t});
+    if(!isNaN(t)){
+      const dateKey = new Date(t).toISOString().slice(0,10);
+      dailyTotals[dateKey] = (dailyTotals[dateKey]||0) + count;
+    }
+
+    const marker = L.circleMarker([lat,lon], {
+      radius:4, weight:1, color:'#fff', fillOpacity:.75,
+      fillColor: getComputedStyle(document.documentElement).getPropertyValue('--teal-mid').trim()
+    }).bindPopup(`${lat.toFixed(5)}, ${lon.toFixed(5)}`).addTo(dropLayer);
+    dropMarkers.push({marker, lat, lon});
+
+    if(villages.length){
+      let nearest = villages[0], best = Infinity;
+      villages.forEach(v => {
+        const dist = haversine(lat,lon,v.lat,v.lon);
+        if(dist < best){ best = dist; nearest = v; }
+      });
+      if(best <= OUTLIER_KM){
+        nearest.kesz += count;
+      } else {
+        outlierCount++;
+      }
+    } else {
+      outlierCount++;
+    }
+  });
+
+  renderRoute(routePoints);
+  renderDailyChart(dailyTotals);
+  renderEstimate(dailyTotals, totalKesz);
+
+  lastVillages = villages;
+  renderVillageTable([...villages].sort((a,b) => a.nev.localeCompare(b.nev,'hu')));
+  updateSuggestion(villages);
+
+  const warningsEl = document.getElementById('data-warnings');
+  const warnings = [];
+  if(invalidDropCount) warnings.push(`${invalidDropCount} hibás Drops sor kimaradt`);
+  if(duplicateCount) warnings.push(`${duplicateCount} duplikátum szűrve`);
+  if(outlierCount) warnings.push(`${outlierCount} pont nem volt hozzárendelhető egyik faluhoz sem`);
+  if(invalidVillageCount) warnings.push(`${invalidVillageCount} hibás Falvak sor kimaradt`);
+  if(warnings.length){
+    warningsEl.textContent = warnings.join(' · ');
+    warningsEl.style.display = 'block';
+  } else {
+    warningsEl.style.display = 'none';
+  }
 
   const overallPct = Math.round((totalKesz / TOTAL_TARGET) * 100);
   document.getElementById('summary-count').textContent = `${totalKesz.toLocaleString('hu-HU')} / ${TOTAL_TARGET.toLocaleString('hu-HU')} db`;
@@ -592,6 +773,28 @@ document.getElementById('save-btn').addEventListener('click', () => {
 });
 document.getElementById('demo-btn').addEventListener('click', loadDemo);
 
+document.getElementById('sort-pct-th').addEventListener('click', () => {
+  if(!lastVillages.length) return;
+  sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+  document.getElementById('sort-arrow').textContent = sortDir === 'asc' ? '↑' : '↓';
+  const sorted = [...lastVillages].sort((a,b) => {
+    const pa = a.cel > 0 ? a.kesz/a.cel : -1;
+    const pb = b.cel > 0 ? b.kesz/b.cel : -1;
+    return sortDir === 'asc' ? pa-pb : pb-pa;
+  });
+  renderVillageTable(sorted);
+});
+
+document.getElementById('suggestion-link').addEventListener('click', (e) => {
+  e.preventDefault();
+  if(!suggestedVillageName) return;
+  const marker = villageMarkers[suggestedVillageName];
+  if(marker){
+    map.setView(marker.getLatLng(), 16);
+    marker.openPopup();
+  }
+});
+
 document.getElementById('village-tbody').addEventListener('click', (e) => {
   const link = e.target.closest('.village-link');
   if(!link) return;
@@ -610,6 +813,9 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('settings-details').open = false;
   loadFromSheets();
   startAutoRefresh();
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
 });
 </script>
 
