@@ -244,9 +244,11 @@
     <div class="hint" id="data-warnings" style="display:none;color:var(--amber);margin-top:10px;"></div>
   </div>
 
-  <div class="card" id="suggestion-card" style="display:none;">
-    <div style="font-size:13px;color:var(--text-muted);font-weight:500;margin-bottom:4px;">Javasolt következő cél</div>
-    <a href="#" id="suggestion-link" class="village-link" style="font-size:18px;"></a>
+  <div class="card" id="route-card" style="display:none;">
+    <div style="font-size:13px;color:var(--text-muted);font-weight:500;margin-bottom:8px;">Javasolt bejárási sorrend</div>
+    <ol id="route-list" style="margin:0 0 16px;padding-left:20px;font-size:14px;line-height:1.9;"></ol>
+    <div style="font-size:13px;color:var(--text-muted);font-weight:500;margin-bottom:8px;">Körzetek (közeli falvak csoportosítva)</div>
+    <ul id="zone-list" style="margin:0;padding-left:20px;font-size:14px;line-height:1.9;color:var(--text);"></ul>
   </div>
 
   <div class="card">
@@ -256,6 +258,10 @@
   </div>
 
   <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+      <button class="secondary" id="live-toggle-btn" type="button">Élő pozíció bekapcsolása</button>
+      <div class="hint" id="already-visited-banner" style="display:none;margin:0;color:var(--green);font-weight:700;"></div>
+    </div>
     <div id="map"></div>
     <div class="legend">
       <span><i class="dot" style="background:var(--red)"></i>0–33%</span>
@@ -263,6 +269,8 @@
       <span><i class="dot" style="background:var(--green)"></i>66%+</span>
       <span><i class="dot" style="background:var(--teal-mid);opacity:.6"></i>egyedi ledobott flyer</span>
       <span><i class="dot" style="background:var(--green);opacity:.5"></i>lefedett utca</span>
+      <span><i class="dot" style="background:var(--green);opacity:.45"></i>lefedett ház</span>
+      <span><i class="dot" style="background:#2b6cff"></i>élő pozíció</span>
     </div>
   </div>
 
@@ -308,7 +316,7 @@ const TOTAL_TARGET = 5000;
 const DEFAULT_FALVAK_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQMo_49VBnvBA-0hWq0a2pFxeFV_JTBncKY_7K9syRE7Htq0GltLYBuQ84dZu_RYh7BpVuZkFPXsGF-/pub?gid=603047761&single=true&output=csv';
 const DEFAULT_DROPS_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQMo_49VBnvBA-0hWq0a2pFxeFV_JTBncKY_7K9syRE7Htq0GltLYBuQ84dZu_RYh7BpVuZkFPXsGF-/pub?gid=1804916497&single=true&output=csv';
 
-let map, villageLayer = L.layerGroup(), dropLayer = L.layerGroup(), routeLayer = L.layerGroup();
+let map, villageLayer = L.layerGroup(), dropLayer = L.layerGroup(), routeLayer = L.layerGroup(), buildingLayer = L.layerGroup(), liveLayer = L.layerGroup();
 let villageMarkers = {};
 let dropMarkers = [];
 let hasFitBounds = false;
@@ -317,6 +325,7 @@ let lastVillages = [];
 let sortDir = null;
 let dailyChart = null;
 let suggestedVillageName = null;
+let coveredSegments = [];
 const POLL_MS = 60000;
 const OUTLIER_KM = 3;
 const OVERPASS_CACHE_PREFIX = 'cwt_overpass_cache_';
@@ -329,8 +338,10 @@ function initMap(){
     maxZoom: 19
   }).addTo(map);
   routeLayer.addTo(map);
+  buildingLayer.addTo(map);
   dropLayer.addTo(map);
   villageLayer.addTo(map);
+  liveLayer.addTo(map);
 }
 
 function parseCSV(text){
@@ -423,6 +434,25 @@ function distPointToSegment(px,py,ax,ay,bx,by){
   return Math.hypot(px-cx, py-cy);
 }
 
+function pointInPolygon(px, py, poly){
+  let inside = false;
+  for(let i=0, j=poly.length-1; i<poly.length; j=i++){
+    const xi=poly[i][0], yi=poly[i][1], xj=poly[j][0], yj=poly[j][1];
+    const intersect = ((yi>py) !== (yj>py)) && (px < (xj-xi)*(py-yi)/(yj-yi)+xi);
+    if(intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function distPointToPolygon(px, py, poly){
+  let best = Infinity;
+  for(let i=0; i<poly.length-1; i++){
+    const d = distPointToSegment(px,py, poly[i][0],poly[i][1], poly[i+1][0],poly[i+1][1]);
+    if(d < best) best = d;
+  }
+  return best;
+}
+
 function cleanOverpassCache(){
   try{
     const now = Date.now();
@@ -436,35 +466,40 @@ function cleanOverpassCache(){
   }catch(e){}
 }
 
-async function fetchOverpassWays(minLat,minLon,maxLat,maxLon){
+async function fetchOverpassElements(minLat,minLon,maxLat,maxLon){
   const cacheKey = OVERPASS_CACHE_PREFIX + [minLat,minLon,maxLat,maxLon].map(n=>n.toFixed(3)).join('_');
   try{
     const cachedRaw = localStorage.getItem(cacheKey);
     if(cachedRaw){
       const cached = JSON.parse(cachedRaw);
-      if(Date.now() - cached.ts < OVERPASS_CACHE_TTL_MS) return cached.ways;
+      if(Date.now() - cached.ts < OVERPASS_CACHE_TTL_MS) return cached;
     }
   }catch(e){}
 
-  const query = `[out:json][timeout:20];way["highway"](${minLat},${minLon},${maxLat},${maxLon});out geom;`;
+  const query = `[out:json][timeout:25];(way["highway"](${minLat},${minLon},${maxLat},${maxLon});way["building"](${minLat},${minLon},${maxLat},${maxLon}););out geom;`;
   const res = await fetch('https://overpass-api.de/api/interpreter', {
     method: 'POST',
     body: 'data=' + encodeURIComponent(query)
   });
   if(!res.ok) throw new Error('Overpass hiba');
   const data = await res.json();
-  const ways = (data.elements||[]).filter(el => el.type==='way' && el.geometry && el.geometry.length>1);
+  const all = (data.elements||[]).filter(el => el.type==='way' && el.geometry && el.geometry.length>1);
+  const streetWays = all.filter(el => el.tags && el.tags.highway);
+  const buildingWays = all.filter(el => el.tags && el.tags.building);
+  const result = { streetWays, buildingWays };
 
   try{
     cleanOverpassCache();
-    localStorage.setItem(cacheKey, JSON.stringify({ts:Date.now(), ways}));
+    localStorage.setItem(cacheKey, JSON.stringify({ts:Date.now(), streetWays, buildingWays}));
   }catch(e){}
 
-  return ways;
+  return result;
 }
 
 async function colorCoveredStreets(routePoints){
   const result = { drewAny:false, streetNames:new Array(routePoints.length).fill(null) };
+  buildingLayer.clearLayers();
+  coveredSegments = [];
   if(!routePoints.length) return result;
   let minLat=90, maxLat=-90, minLon=180, maxLon=-180;
   routePoints.forEach(p => {
@@ -476,8 +511,8 @@ async function colorCoveredStreets(routePoints){
   const buf = 0.003;
   minLat-=buf; maxLat+=buf; minLon-=buf; maxLon+=buf;
 
-  const ways = await fetchOverpassWays(minLat,minLon,maxLat,maxLon);
-  if(!ways.length) return result;
+  const { streetWays, buildingWays } = await fetchOverpassElements(minLat,minLon,maxLat,maxLon);
+  if(!streetWays.length && !buildingWays.length) return result;
 
   const refLat = (minLat+maxLat)/2;
   const mPerDegLat = 111320;
@@ -488,7 +523,7 @@ async function colorCoveredStreets(routePoints){
   const THRESH = 20;
   const greenColor = getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
 
-  ways.forEach(way => {
+  streetWays.forEach(way => {
     const nodesXY = way.geometry.map(n => toXY(n.lat,n.lon));
     const wayName = way.tags && way.tags.name ? way.tags.name : null;
     for(let i=0; i<nodesXY.length-1; i++){
@@ -503,16 +538,34 @@ async function colorCoveredStreets(routePoints){
         }
       }
       if(segCovered){
-        L.polyline([
-          [way.geometry[i].lat, way.geometry[i].lon],
-          [way.geometry[i+1].lat, way.geometry[i+1].lon]
-        ], {
+        const a = [way.geometry[i].lat, way.geometry[i].lon];
+        const b = [way.geometry[i+1].lat, way.geometry[i+1].lon];
+        L.polyline([a,b], {
           color: greenColor, weight: 7, opacity: .5, lineCap: 'round', lineJoin: 'round'
         }).addTo(routeLayer);
+        coveredSegments.push({a, b});
         result.drewAny = true;
       }
     }
   });
+
+  const BUILDING_THRESH = 15;
+  buildingWays.forEach(way => {
+    const polyXY = way.geometry.map(n => toXY(n.lat,n.lon));
+    let covered = false;
+    for(let j=0; j<ptsXY.length && !covered; j++){
+      const [px,py] = ptsXY[j];
+      if(pointInPolygon(px,py,polyXY) || distPointToPolygon(px,py,polyXY) < BUILDING_THRESH){
+        covered = true;
+      }
+    }
+    if(covered){
+      L.polygon(way.geometry.map(n => [n.lat,n.lon]), {
+        color: greenColor, weight: 1, fillColor: greenColor, fillOpacity: .45
+      }).addTo(buildingLayer);
+    }
+  });
+
   return result;
 }
 
@@ -565,20 +618,40 @@ function renderDailyChart(dailyTotals){
   if(!canvas || typeof Chart === 'undefined') return;
   const dates = Object.keys(dailyTotals).sort();
   const values = dates.map(d => dailyTotals[d]);
+  let running = 0;
+  const cumulative = values.map(v => running += v);
   const labels = dates.map(d => new Date(d+'T00:00:00').toLocaleDateString('hu-HU', {month:'numeric', day:'numeric'}));
+  const teal = getComputedStyle(document.documentElement).getPropertyValue('--teal').trim();
+  const green = getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
   if(dailyChart) dailyChart.destroy();
   dailyChart = new Chart(canvas, {
-    type: 'bar',
-    data: { labels, datasets: [{
-      data: values,
-      backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--teal').trim(),
-      borderRadius: 4,
-      maxBarThickness: 28
-    }]},
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar', label: 'Napi db',
+          data: values, backgroundColor: teal, borderRadius: 4, maxBarThickness: 28,
+          yAxisID: 'y'
+        },
+        {
+          type: 'line', label: 'Összesen',
+          data: cumulative, borderColor: green, backgroundColor: 'transparent',
+          tension: .3, pointRadius: 3, pointBackgroundColor: green,
+          yAxisID: 'y1'
+        }
+      ]
+    },
     options: {
       responsive: true,
-      plugins: { legend:{display:false}, tooltip:{ callbacks:{ label:(c)=>c.parsed.y+' db' } } },
-      scales: { x:{ grid:{display:false} }, y:{ beginAtZero:true, ticks:{ precision:0 } } }
+      plugins: {
+        legend: { display:true, labels:{ boxWidth:12, font:{size:11} } },
+        tooltip: { callbacks:{ label:(c)=> c.dataset.label + ': ' + c.parsed.y + ' db' } }
+      },
+      scales: {
+        x: { grid:{display:false} },
+        y: { beginAtZero:true, ticks:{precision:0}, title:{display:true, text:'Napi', font:{size:10}} },
+        y1: { beginAtZero:true, position:'right', grid:{drawOnChartArea:false}, ticks:{precision:0}, title:{display:true, text:'Összesen', font:{size:10}} }
+      }
     }
   });
 }
@@ -609,21 +682,87 @@ function renderEstimate(dailyTotals, totalKesz){
   el.textContent = `Jelenlegi tempó: ${perDay.toFixed(1)} db/nap. Ha így haladtok, kb. ${finishDate.toLocaleDateString('hu-HU')} körül végeztek az 5000 db-bal.`;
 }
 
-function updateSuggestion(villages){
-  const card = document.getElementById('suggestion-card');
-  const link = document.getElementById('suggestion-link');
-  const candidates = villages.filter(v => v.cel > 0 && (v.kesz/v.cel) < 1);
-  if(!candidates.length){
+function clusterVillages(list, thresholdKm){
+  const n = list.length;
+  const parent = Array.from({length:n}, (_,i)=>i);
+  function find(x){ return parent[x]===x ? x : (parent[x]=find(parent[x])); }
+  function union(a,b){ const ra=find(a), rb=find(b); if(ra!==rb) parent[ra]=rb; }
+  for(let i=0;i<n;i++){
+    for(let j=i+1;j<n;j++){
+      if(haversine(list[i].lat,list[i].lon,list[j].lat,list[j].lon) <= thresholdKm) union(i,j);
+    }
+  }
+  const groups = {};
+  for(let i=0;i<n;i++){
+    const r = find(i);
+    (groups[r] = groups[r]||[]).push(list[i]);
+  }
+  return Object.values(groups);
+}
+
+async function fetchOsrmDurationMatrix(points){
+  const coordStr = points.map(p => `${p[0]},${p[1]}`).join(';');
+  const url = `https://router.project-osrm.org/table/v1/driving/${coordStr}?annotations=duration`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('OSRM hiba');
+  const data = await res.json();
+  if(data.code !== 'Ok') throw new Error('OSRM hiba');
+  return data.durations;
+}
+
+async function renderRoutePlan(villages){
+  const card = document.getElementById('route-card');
+  const routeListEl = document.getElementById('route-list');
+  const zoneListEl = document.getElementById('zone-list');
+  const incomplete = villages.filter(v => v.cel > 0 && v.kesz < v.cel);
+
+  if(!incomplete.length){
     card.style.display = 'none';
     suggestedVillageName = null;
     return;
   }
-  candidates.sort((a,b) => (a.kesz/a.cel) - (b.kesz/b.cel));
-  const best = candidates[0];
-  const pct = Math.round((best.kesz/best.cel)*100);
-  suggestedVillageName = best.nev;
-  link.textContent = `${best.nev} (${pct}%)`;
   card.style.display = 'block';
+
+  let order = [...incomplete].sort((a,b) => (a.kesz/a.cel) - (b.kesz/b.cel));
+
+  try{
+    const points = incomplete.map(v => [v.lon, v.lat]);
+    const durations = await fetchOsrmDurationMatrix(points);
+    const n = points.length;
+    let startIdx = 0, startPct = Infinity;
+    incomplete.forEach((v,i) => { const p = v.kesz/v.cel; if(p < startPct){ startPct = p; startIdx = i; } });
+    const visited = new Array(n).fill(false);
+    let current = startIdx;
+    visited[current] = true;
+    const seq = [incomplete[current]];
+    for(let step=1; step<n; step++){
+      let bestIdx = -1, bestDur = Infinity;
+      for(let j=0;j<n;j++){
+        if(visited[j]) continue;
+        const d = durations[current] ? durations[current][j] : null;
+        if(d != null && d < bestDur){ bestDur = d; bestIdx = j; }
+      }
+      if(bestIdx === -1) break;
+      visited[bestIdx] = true;
+      seq.push(incomplete[bestIdx]);
+      current = bestIdx;
+    }
+    if(seq.length === n) order = seq;
+  }catch(e){
+    // marad a %-alapú sorrend, ha az OSRM nem elérhető
+  }
+
+  suggestedVillageName = order[0].nev;
+  routeListEl.innerHTML = order.map(v => {
+    const pct = Math.round((v.kesz/v.cel)*100);
+    return `<li><a href="#" class="village-link" data-nev="${v.nev}">${v.nev}</a> – ${pct}%</li>`;
+  }).join('');
+
+  const clusters = clusterVillages(incomplete, 4);
+  zoneListEl.innerHTML = clusters.map((g,i) => {
+    const names = g.map(v=>v.nev).join(', ');
+    return `<li>${i+1}. körzet: ${names}</li>`;
+  }).join('');
 }
 
 function render(falvak, drops){
@@ -698,7 +837,7 @@ function render(falvak, drops){
 
   lastVillages = villages;
   renderVillageTable([...villages].sort((a,b) => a.nev.localeCompare(b.nev,'hu')));
-  updateSuggestion(villages);
+  renderRoutePlan(villages);
 
   const warningsEl = document.getElementById('data-warnings');
   const warnings = [];
@@ -785,25 +924,89 @@ document.getElementById('sort-pct-th').addEventListener('click', () => {
   renderVillageTable(sorted);
 });
 
-document.getElementById('suggestion-link').addEventListener('click', (e) => {
-  e.preventDefault();
-  if(!suggestedVillageName) return;
-  const marker = villageMarkers[suggestedVillageName];
+let liveMarker = null;
+let liveWatchId = null;
+let alreadyVisitedFlag = false;
+
+function checkAlreadyVisited(lat, lon){
+  const banner = document.getElementById('already-visited-banner');
+  if(!coveredSegments.length){ banner.style.display = 'none'; alreadyVisitedFlag = false; return; }
+  const refLat = lat;
+  const mPerDegLat = 111320;
+  const mPerDegLon = 111320 * Math.cos(refLat*Math.PI/180);
+  const toXY = (la,lo) => [lo*mPerDegLon, la*mPerDegLat];
+  const [px,py] = toXY(lat,lon);
+  const THRESH = 20;
+  let near = false;
+  for(const seg of coveredSegments){
+    const [ax,ay] = toXY(seg.a[0], seg.a[1]);
+    const [bx,by] = toXY(seg.b[0], seg.b[1]);
+    if(distPointToSegment(px,py,ax,ay,bx,by) < THRESH){ near = true; break; }
+  }
+  if(near && !alreadyVisitedFlag){
+    banner.textContent = 'Ezen az utcán már jártatok';
+    banner.style.display = 'block';
+  } else if(!near){
+    banner.style.display = 'none';
+  }
+  alreadyVisitedFlag = near;
+}
+
+function toggleLivePosition(){
+  const btn = document.getElementById('live-toggle-btn');
+  if(liveWatchId !== null){
+    navigator.geolocation.clearWatch(liveWatchId);
+    liveWatchId = null;
+    liveLayer.clearLayers();
+    liveMarker = null;
+    document.getElementById('already-visited-banner').style.display = 'none';
+    btn.textContent = 'Élő pozíció bekapcsolása';
+    return;
+  }
+  if(!('geolocation' in navigator)){
+    alert('A böngésződ nem támogatja a helymeghatározást.');
+    return;
+  }
+  btn.textContent = 'Élő pozíció kikapcsolása';
+  liveWatchId = navigator.geolocation.watchPosition((pos) => {
+    const { latitude, longitude } = pos.coords;
+    if(!liveMarker){
+      liveMarker = L.circleMarker([latitude,longitude], {
+        radius:9, weight:3, color:'#fff', fillColor:'#2b6cff', fillOpacity:1
+      }).addTo(liveLayer).bindPopup('Te vagy itt');
+    } else {
+      liveMarker.setLatLng([latitude,longitude]);
+    }
+    checkAlreadyVisited(latitude, longitude);
+  }, () => {
+    alert('Nem sikerült elérni a helyzetedet – engedélyezd a helymeghatározást a böngészőben.');
+    btn.textContent = 'Élő pozíció bekapcsolása';
+    liveWatchId = null;
+  }, { enableHighAccuracy:true, maximumAge:5000 });
+}
+
+document.getElementById('live-toggle-btn').addEventListener('click', toggleLivePosition);
+
+function goToVillage(nev){
+  const marker = villageMarkers[nev];
   if(marker){
     map.setView(marker.getLatLng(), 16);
     marker.openPopup();
   }
+}
+
+document.getElementById('route-list').addEventListener('click', (e) => {
+  const link = e.target.closest('.village-link');
+  if(!link) return;
+  e.preventDefault();
+  goToVillage(link.dataset.nev);
 });
 
 document.getElementById('village-tbody').addEventListener('click', (e) => {
   const link = e.target.closest('.village-link');
   if(!link) return;
   e.preventDefault();
-  const marker = villageMarkers[link.dataset.nev];
-  if(marker){
-    map.setView(marker.getLatLng(), 16);
-    marker.openPopup();
-  }
+  goToVillage(link.dataset.nev);
 });
 
 window.addEventListener('DOMContentLoaded', () => {
