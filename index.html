@@ -398,18 +398,35 @@ function haversine(lat1,lon1,lat2,lon2){
 
 async function renderRoute(routePoints){
   routeLayer.clearLayers();
+  buildingLayer.clearLayers();
+  coveredSegments = [];
   if(!routePoints.length) return;
-  let result = { drewAny:false, streetNames:new Array(routePoints.length).fill(null) };
-  try{
-    result = await colorCoveredStreets(routePoints);
-  }catch(e){
-    result = { drewAny:false, streetNames:new Array(routePoints.length).fill(null) };
-  }
-  if(!result.drewAny){
-    drawFallbackRoute(routePoints);
-  }
+
+  const groups = {};
+  routePoints.forEach((p, idx) => {
+    const key = p.village || '__egyeb__';
+    (groups[key] = groups[key] || []).push(idx);
+  });
+
+  const streetNames = new Array(routePoints.length).fill(null);
+
+  await Promise.all(Object.keys(groups).map(async (key) => {
+    const idxs = groups[key];
+    const pts = idxs.map(i => routePoints[i]);
+    let result;
+    try{
+      result = await colorCoveredStreets(pts);
+    }catch(e){
+      result = { drewAny:false, streetNames:new Array(pts.length).fill(null) };
+    }
+    idxs.forEach((globalIdx, localIdx) => { streetNames[globalIdx] = result.streetNames[localIdx]; });
+    if(!result.drewAny){
+      drawFallbackRoute(pts);
+    }
+  }));
+
   dropMarkers.forEach((dm,i) => {
-    const name = result.streetNames[i];
+    const name = streetNames[i];
     if(name) dm.marker.setPopupContent(`<strong>${name}</strong>`);
   });
 }
@@ -648,6 +665,7 @@ function renderDailyChart(dailyTotals){
   const green = getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
   if(dailyChart) dailyChart.destroy();
   dailyChart = new Chart(canvas, {
+    type: 'bar',
     data: {
       labels,
       datasets: [
@@ -829,7 +847,8 @@ function render(falvak, drops){
     totalKesz += count;
 
     const t = Date.parse((zeitStr||'').replace(' ','T'));
-    routePoints.push({lat, lon, t});
+    const routePoint = {lat, lon, t, village:null};
+    routePoints.push(routePoint);
     if(!isNaN(t)){
       const dateKey = new Date(t).toISOString().slice(0,10);
       dailyTotals[dateKey] = (dailyTotals[dateKey]||0) + count;
@@ -849,6 +868,7 @@ function render(falvak, drops){
       });
       if(best <= OUTLIER_KM){
         nearest.kesz += count;
+        routePoint.village = nearest.nev;
       } else {
         outlierCount++;
       }
@@ -857,13 +877,13 @@ function render(falvak, drops){
     }
   });
 
-  renderRoute(routePoints);
-  renderDailyChart(dailyTotals);
-  renderEstimate(dailyTotals, totalKesz);
+  try{ renderRoute(routePoints); }catch(e){ console.error('renderRoute hiba', e); }
+  try{ renderDailyChart(dailyTotals); }catch(e){ console.error('renderDailyChart hiba', e); }
+  try{ renderEstimate(dailyTotals, totalKesz); }catch(e){ console.error('renderEstimate hiba', e); }
 
   lastVillages = villages;
-  renderVillageTable([...villages].sort((a,b) => a.nev.localeCompare(b.nev,'hu')));
-  renderRoutePlan(villages);
+  try{ renderVillageTable([...villages].sort((a,b) => a.nev.localeCompare(b.nev,'hu'))); }catch(e){ console.error('renderVillageTable hiba', e); }
+  try{ renderRoutePlan(villages); }catch(e){ console.error('renderRoutePlan hiba', e); }
 
   const warningsEl = document.getElementById('data-warnings');
   const warnings = [];
