@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Choice with Tibor – Szórólap tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+  :root{
+    --teal:#1E474B;
+    --teal-light:#e6eeee;
+    --teal-mid:#3d6b6f;
+    --red:#c0453f;
+    --amber:#d99a2b;
+    --green:#2f7d5c;
+    --bg:#f7f6f2;
+    --card:#ffffff;
+    --text:#1c2b2c;
+    --text-muted:#6b7a7b;
+    --border:#e1e3df;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:'Manrope',sans-serif;
+    background:var(--bg);
+    color:var(--text);
+  }
+  header{
+    background:var(--teal);
+    color:#fff;
+    padding:20px 24px;
+  }
+  header h1{
+    margin:0;
+    font-size:20px;
+    font-weight:700;
+    letter-spacing:.2px;
+  }
+  header p{
+    margin:4px 0 0;
+    font-size:13px;
+    color:#cfe0df;
+  }
+  main{
+    max-width:960px;
+    margin:0 auto;
+    padding:20px 16px 60px;
+  }
+  .card{
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:18px 20px;
+    margin-bottom:20px;
+  }
+  .summary-row{
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    margin-bottom:10px;
+    flex-wrap:wrap;
+    gap:6px;
+  }
+  .summary-row .big{
+    font-size:26px;
+    font-weight:800;
+    color:var(--teal);
+  }
+  .summary-row .label{
+    font-size:13px;
+    color:var(--text-muted);
+    font-weight:500;
+  }
+  .progress-track{
+    background:var(--teal-light);
+    border-radius:999px;
+    height:14px;
+    overflow:hidden;
+  }
+  .progress-fill{
+    height:100%;
+    background:var(--teal);
+    border-radius:999px;
+    transition:width .4s ease;
+  }
+  #map{
+    height:440px;
+    border-radius:12px;
+    border:1px solid var(--border);
+  }
+  table{
+    width:100%;
+    border-collapse:collapse;
+    font-size:14px;
+  }
+  th{
+    text-align:left;
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.03em;
+    color:var(--text-muted);
+    font-weight:700;
+    padding:6px 8px;
+    border-bottom:1px solid var(--border);
+  }
+  td{
+    padding:8px;
+    border-bottom:1px solid var(--border);
+    vertical-align:middle;
+  }
+  tr:last-child td{border-bottom:none;}
+  .mini-track{
+    background:var(--teal-light);
+    border-radius:999px;
+    height:8px;
+    width:100px;
+    overflow:hidden;
+    display:inline-block;
+    vertical-align:middle;
+  }
+  .mini-fill{
+    height:100%;
+    border-radius:999px;
+  }
+  .pct{
+    font-weight:700;
+    font-variant-numeric:tabular-nums;
+  }
+  details{
+    margin-bottom:20px;
+  }
+  summary{
+    cursor:pointer;
+    font-weight:700;
+    color:var(--teal);
+    padding:6px 0;
+    font-size:14px;
+  }
+  .settings-body{
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:18px 20px;
+    margin-top:8px;
+  }
+  label{
+    display:block;
+    font-size:12px;
+    font-weight:700;
+    color:var(--text-muted);
+    margin-bottom:4px;
+    text-transform:uppercase;
+    letter-spacing:.03em;
+  }
+  input[type=text]{
+    width:100%;
+    padding:10px 12px;
+    border:1px solid var(--border);
+    border-radius:8px;
+    font-family:'Manrope',sans-serif;
+    font-size:14px;
+    margin-bottom:14px;
+  }
+  button{
+    background:var(--teal);
+    color:#fff;
+    border:none;
+    border-radius:8px;
+    padding:10px 18px;
+    font-family:'Manrope',sans-serif;
+    font-weight:700;
+    font-size:14px;
+    cursor:pointer;
+  }
+  button.secondary{
+    background:transparent;
+    color:var(--teal);
+    border:1px solid var(--teal);
+  }
+  .btn-row{display:flex;gap:10px;flex-wrap:wrap;}
+  .hint{
+    font-size:12px;
+    color:var(--text-muted);
+    line-height:1.5;
+    margin-top:10px;
+  }
+  .status{
+    font-size:13px;
+    color:var(--text-muted);
+    margin-top:10px;
+  }
+  .empty-state{
+    text-align:center;
+    padding:30px 10px;
+    color:var(--text-muted);
+    font-size:14px;
+  }
+  .legend{
+    display:flex;
+    gap:16px;
+    font-size:12px;
+    color:var(--text-muted);
+    margin-top:10px;
+    flex-wrap:wrap;
+  }
+  .legend span{display:inline-flex;align-items:center;gap:6px;}
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Szórólap tracker</h1>
+  <p>Choice with Tibor · postaládás DE kampány · 5000 db</p>
+</header>
+
+<main>
+
+  <div class="card">
+    <div class="summary-row">
+      <div>
+        <div class="label">Összesen kiosztva</div>
+        <div class="big" id="summary-count">0 / 5000 db</div>
+      </div>
+      <div class="big" id="summary-pct">0%</div>
+    </div>
+    <div class="progress-track"><div class="progress-fill" id="summary-fill" style="width:0%"></div></div>
+  </div>
+
+  <div class="card">
+    <div id="map"></div>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--red)"></i>0–33%</span>
+      <span><i class="dot" style="background:var(--amber)"></i>33–66%</span>
+      <span><i class="dot" style="background:var(--green)"></i>66%+</span>
+      <span><i class="dot" style="background:var(--teal-mid);opacity:.6"></i>egyedi ledobott flyer</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <table id="village-table">
+      <thead>
+        <tr><th>Falu</th><th>Cél</th><th>Kész</th><th>%</th><th></th></tr>
+      </thead>
+      <tbody id="village-tbody"></tbody>
+    </table>
+    <div class="empty-state" id="table-empty" style="display:none;">Nincs még adat – add meg a Google Sheet linkeket lent.</div>
+  </div>
+
+  <details id="settings-details">
+    <summary>Beállítások – Google Sheet linkek</summary>
+    <div class="settings-body">
+      <label for="falvak-url">Falvak fül – publikált CSV link</label>
+      <input type="text" id="falvak-url" placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?gid=0&single=true&output=csv">
+      <label for="drops-url">Drops fül – publikált CSV link</label>
+      <input type="text" id="drops-url" placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?gid=123&single=true&output=csv">
+      <div class="btn-row">
+        <button id="save-btn">Mentés és frissítés</button>
+        <button class="secondary" id="demo-btn">Minta adatok betöltése</button>
+      </div>
+      <div class="status" id="status-line"></div>
+      <div class="hint">
+        A linkeket a Google Sheet-ben: Fájl → Megosztás → Közzététel a weben → az adott fül kiválasztása → CSV formátum. A böngésző elmenti a linkeket (localStorage), nem kell újra beírni.<br>
+        <strong>Falvak fül oszlopai:</strong> Falu | Lat | Lon | Cél<br>
+        <strong>Drops fül oszlopai:</strong> Zeit | Flyer | Ort | Notiz (a FlyerTracker exportot közvetlenül ide másold be)
+      </div>
+    </div>
+  </details>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+const STORAGE_FALVAK = 'cwt_tracker_falvak_url';
+const STORAGE_DROPS = 'cwt_tracker_drops_url';
+const TOTAL_TARGET = 5000;
+
+let map, villageLayer = L.layerGroup(), dropLayer = L.layerGroup();
+
+function initMap(){
+  map = L.map('map', {scrollWheelZoom:false}).setView([47.20, 16.13], 12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+  villageLayer.addTo(map);
+  dropLayer.addTo(map);
+}
+
+function parseCSV(text){
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for(let i=0;i<text.length;i++){
+    const c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if(c === '"') inQuotes = true;
+      else if(c === ','){ row.push(field); field=''; }
+      else if(c === '\n' || c === '\r'){
+        if(c === '\r' && text[i+1] === '\n') i++;
+        row.push(field); field='';
+        if(row.length>1 || row[0]!=='') rows.push(row);
+        row = [];
+      } else field += c;
+    }
+  }
+  if(field!=='' || row.length){ row.push(field); rows.push(row); }
+  if(!rows.length) return [];
+  const headers = rows[0].map(h => h.trim().toLowerCase());
+  return rows.slice(1).filter(r => r.some(v=>v!==undefined && v.trim()!=='')).map(r => {
+    const obj = {};
+    headers.forEach((h,idx) => obj[h] = (r[idx]||'').trim());
+    return obj;
+  });
+}
+
+function colFind(obj, ...candidates){
+  for(const c of candidates){ if(obj[c] !== undefined) return obj[c]; }
+  return '';
+}
+
+function haversine(lat1,lon1,lat2,lon2){
+  const R=6371, dLat=(lat2-lat1)*Math.PI/180, dLon=(lon2-lon1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function colorFor(pct){
+  if(pct >= 66) return getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
+  if(pct >= 33) return getComputedStyle(document.documentElement).getPropertyValue('--amber').trim();
+  return getComputedStyle(document.documentElement).getPropertyValue('--red').trim();
+}
+
+async function fetchCSV(url){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('Nem sikerült betölteni: ' + url);
+  return parseCSV(await res.text());
+}
+
+function render(falvak, drops){
+  villageLayer.clearLayers();
+  dropLayer.clearLayers();
+
+  const villages = falvak.map(f => ({
+    nev: colFind(f,'falu','village','name'),
+    lat: parseFloat(colFind(f,'lat','latitude')),
+    lon: parseFloat(colFind(f,'lon','lng','longitude')),
+    cel: parseFloat(colFind(f,'cél','cel','target')) || 0,
+    kesz: 0
+  })).filter(v => v.nev && !isNaN(v.lat) && !isNaN(v.lon));
+
+  let totalKesz = 0;
+
+  drops.forEach(d => {
+    const ort = colFind(d,'ort','hely','location');
+    const parts = ort.split(',').map(s=>parseFloat(s.trim()));
+    if(parts.length < 2 || isNaN(parts[0]) || isNaN(parts[1])) return;
+    const [lat, lon] = parts;
+    const count = parseFloat(colFind(d,'flyer','db','count')) || 1;
+    totalKesz += count;
+
+    L.circleMarker([lat,lon], {
+      radius:3, weight:0, fillOpacity:.55,
+      fillColor: getComputedStyle(document.documentElement).getPropertyValue('--teal-mid').trim()
+    }).addTo(dropLayer);
+
+    if(villages.length){
+      let nearest = villages[0], best = Infinity;
+      villages.forEach(v => {
+        const dist = haversine(lat,lon,v.lat,v.lon);
+        if(dist < best){ best = dist; nearest = v; }
+      });
+      nearest.kesz += count;
+    }
+  });
+
+  const tbody = document.getElementById('village-tbody');
+  tbody.innerHTML = '';
+  document.getElementById('table-empty').style.display = villages.length ? 'none' : 'block';
+
+  const bounds = [];
+  villages.sort((a,b) => a.nev.localeCompare(b.nev,'hu')).forEach(v => {
+    const pct = v.cel > 0 ? Math.round((v.kesz / v.cel) * 100) : 0;
+    const color = colorFor(pct);
+    bounds.push([v.lat, v.lon]);
+
+    L.circleMarker([v.lat, v.lon], {
+      radius:15, weight:2, color:'#fff', fillColor:color, fillOpacity:.9
+    }).bindPopup(`<strong>${v.nev}</strong><br>${v.kesz} / ${v.cel} db (${pct}%)`).addTo(villageLayer);
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${v.nev}</td>
+      <td>${v.cel || '–'}</td>
+      <td>${v.kesz}</td>
+      <td><span class="pct" style="color:${color}">${pct}%</span></td>
+      <td><span class="mini-track"><span class="mini-fill" style="width:${Math.min(pct,100)}%;background:${color}"></span></span></td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  if(bounds.length) map.fitBounds(bounds, {padding:[30,30]});
+
+  const overallPct = Math.round((totalKesz / TOTAL_TARGET) * 100);
+  document.getElementById('summary-count').textContent = `${totalKesz.toLocaleString('hu-HU')} / ${TOTAL_TARGET.toLocaleString('hu-HU')} db`;
+  document.getElementById('summary-pct').textContent = `${overallPct}%`;
+  document.getElementById('summary-fill').style.width = Math.min(overallPct,100) + '%';
+}
+
+async function loadFromSheets(){
+  const falvakUrl = localStorage.getItem(STORAGE_FALVAK);
+  const dropsUrl = localStorage.getItem(STORAGE_DROPS);
+  const status = document.getElementById('status-line');
+  if(!falvakUrl || !dropsUrl){
+    status.textContent = 'Add meg mindkét linket, majd kattints a Mentésre.';
+    return;
+  }
+  status.textContent = 'Frissítés...';
+  try{
+    const [falvak, drops] = await Promise.all([fetchCSV(falvakUrl), fetchCSV(dropsUrl)]);
+    render(falvak, drops);
+    status.textContent = 'Frissítve: ' + new Date().toLocaleString('hu-HU');
+  }catch(e){
+    status.textContent = 'Hiba történt: ' + e.message;
+  }
+}
+
+function loadDemo(){
+  const falvak = [
+    {falu:'Stinatz', lat:'47.2050', lon:'16.1345', cél:'900'},
+    {falu:'Burgauberg', lat:'47.2150', lon:'16.1600', cél:'700'},
+    {falu:'Deutsch Tschantschendorf', lat:'47.2280', lon:'16.1500', cél:'500'},
+    {falu:'Eberau', lat:'47.0330', lon:'16.4460', cél:'650'}
+  ];
+  const drops = [];
+  const base = [[47.2050,16.1345],[47.2150,16.1600],[47.2280,16.1500],[47.0330,16.4460]];
+  base.forEach(([lat,lon],vi) => {
+    const n = [200,120,340,80][vi];
+    for(let i=0;i<n;i++){
+      drops.push({zeit:'', flyer:'1', ort:`${(lat+(Math.random()-0.5)*0.01).toFixed(5)}, ${(lon+(Math.random()-0.5)*0.01).toFixed(5)}`, notiz:''});
+    }
+  });
+  render(falvak, drops);
+  document.getElementById('status-line').textContent = 'Minta adatok betöltve (ez nem valós adat).';
+}
+
+document.getElementById('save-btn').addEventListener('click', () => {
+  localStorage.setItem(STORAGE_FALVAK, document.getElementById('falvak-url').value.trim());
+  localStorage.setItem(STORAGE_DROPS, document.getElementById('drops-url').value.trim());
+  loadFromSheets();
+});
+document.getElementById('demo-btn').addEventListener('click', loadDemo);
+
+window.addEventListener('DOMContentLoaded', () => {
+  initMap();
+  const savedFalvak = localStorage.getItem(STORAGE_FALVAK);
+  const savedDrops = localStorage.getItem(STORAGE_DROPS);
+  if(savedFalvak) document.getElementById('falvak-url').value = savedFalvak;
+  if(savedDrops) document.getElementById('drops-url').value = savedDrops;
+  if(savedFalvak && savedDrops){
+    document.getElementById('settings-details').open = false;
+    loadFromSheets();
+  } else {
+    document.getElementById('settings-details').open = true;
+    loadDemo();
+  }
+});
+</script>
+
+</body>
+</html>
