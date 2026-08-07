@@ -277,7 +277,7 @@
   <div class="card">
     <table id="village-table">
       <thead>
-        <tr><th>Falu</th><th>Cél</th><th>Kész</th><th id="sort-pct-th" style="cursor:pointer;">% <span id="sort-arrow"></span></th><th></th></tr>
+        <tr><th>Falu</th><th>Cél</th><th>Kész</th><th id="sort-pct-th" style="cursor:pointer;">% <span id="sort-arrow"></span></th><th></th><th></th></tr>
       </thead>
       <tbody id="village-tbody"></tbody>
     </table>
@@ -330,6 +330,16 @@ const POLL_MS = 60000;
 const OUTLIER_KM = 3;
 const OVERPASS_CACHE_PREFIX = 'cwt_overpass_cache_';
 const OVERPASS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CLOSED_VILLAGES_KEY = 'cwt_tracker_closed_villages';
+const CLOSE_THRESHOLD_PCT = 95;
+
+function getClosedVillages(){
+  try{ return new Set(JSON.parse(localStorage.getItem(CLOSED_VILLAGES_KEY) || '[]')); }
+  catch(e){ return new Set(); }
+}
+function saveClosedVillages(set){
+  try{ localStorage.setItem(CLOSED_VILLAGES_KEY, JSON.stringify([...set])); }catch(e){}
+}
 
 function initMap(){
   map = L.map('map', {scrollWheelZoom:false}).setView([47.20, 16.13], 12);
@@ -407,12 +417,17 @@ async function renderRoute(routePoints){
 function drawFallbackRoute(routePoints){
   const timed = routePoints.filter(p => !isNaN(p.t)).sort((a,b) => a.t - b.t);
   const GAP_MS = 10 * 60 * 1000;
+  const MAX_JUMP_KM = 0.3;
   const segments = [];
   let current = [];
   timed.forEach((p, i) => {
-    if(i > 0 && (p.t - timed[i-1].t) > GAP_MS){
-      if(current.length > 1) segments.push(current);
-      current = [];
+    if(i > 0){
+      const gapTime = p.t - timed[i-1].t;
+      const gapDist = haversine(p.lat, p.lon, timed[i-1].lat, timed[i-1].lon);
+      if(gapTime > GAP_MS || gapDist > MAX_JUMP_KM){
+        if(current.length > 1) segments.push(current);
+        current = [];
+      }
     }
     current.push(p);
   });
@@ -590,14 +605,21 @@ function renderVillageTable(villages){
 
   const bounds = [];
   villages.forEach(v => {
-    const pct = v.cel > 0 ? Math.round((v.kesz / v.cel) * 100) : 0;
+    const pct = v.closed ? 100 : (v.cel > 0 ? Math.round((v.kesz / v.cel) * 100) : 0);
     const color = colorFor(pct);
     bounds.push([v.lat, v.lon]);
 
     const marker = L.circleMarker([v.lat, v.lon], {
       radius:15, weight:2, color:'#fff', fillColor:color, fillOpacity:.9
-    }).bindPopup(`<strong>${v.nev}</strong><br>${v.kesz} / ${v.cel} db (${pct}%)`).addTo(villageLayer);
+    }).bindPopup(`<strong>${v.nev}</strong><br>${v.kesz} / ${v.cel} db (${pct}%)${v.closed ? ' · lezárva' : ''}`).addTo(villageLayer);
     villageMarkers[v.nev] = marker;
+
+    let actionCell = '';
+    if(v.closed){
+      actionCell = `<a href="#" class="reopen-village-btn" data-nev="${v.nev}" style="font-size:12px;color:var(--text-muted);text-decoration:underline;white-space:nowrap;">Lezárva · visszavonás</a>`;
+    } else if(pct >= CLOSE_THRESHOLD_PCT){
+      actionCell = `<button class="secondary close-village-btn" data-nev="${v.nev}" style="padding:5px 10px;font-size:12px;">Lezárás</button>`;
+    }
 
     const tr = document.createElement('tr');
     tr.innerHTML = `
@@ -606,6 +628,7 @@ function renderVillageTable(villages){
       <td>${v.kesz}</td>
       <td><span class="pct" style="color:${color}">${pct}%</span></td>
       <td><span class="mini-track"><span class="mini-fill" style="width:${Math.min(pct,100)}%;background:${color}"></span></span></td>
+      <td>${actionCell}</td>
     `;
     tbody.appendChild(tr);
   });
@@ -714,7 +737,7 @@ async function renderRoutePlan(villages){
   const card = document.getElementById('route-card');
   const routeListEl = document.getElementById('route-list');
   const zoneListEl = document.getElementById('zone-list');
-  const incomplete = villages.filter(v => v.cel > 0 && v.kesz < v.cel);
+  const incomplete = villages.filter(v => !v.closed && v.cel > 0 && v.kesz < v.cel);
 
   if(!incomplete.length){
     card.style.display = 'none';
@@ -771,13 +794,16 @@ function render(falvak, drops){
   dropMarkers = [];
 
   const rawFalvakCount = falvak.length;
+  const closedSet = getClosedVillages();
   const villages = falvak.map(f => ({
     nev: colFind(f,'falu','village','name'),
     lat: parseFloat(colFind(f,'lat','latitude')),
     lon: parseFloat(colFind(f,'lon','lng','longitude')),
     cel: parseFloat(colFind(f,'cél','cel','target')) || 0,
-    kesz: 0
+    kesz: 0,
+    closed: false
   })).filter(v => v.nev && !isNaN(v.lat) && !isNaN(v.lon));
+  villages.forEach(v => { v.closed = closedSet.has(v.nev); });
   const invalidVillageCount = rawFalvakCount - villages.length;
 
   let totalKesz = 0;
@@ -1002,7 +1028,21 @@ document.getElementById('route-list').addEventListener('click', (e) => {
   goToVillage(link.dataset.nev);
 });
 
+function setVillageClosed(nev, closed){
+  const set = getClosedVillages();
+  if(closed) set.add(nev); else set.delete(nev);
+  saveClosedVillages(set);
+  const v = lastVillages.find(x => x.nev === nev);
+  if(v) v.closed = closed;
+  renderVillageTable([...lastVillages].sort((a,b) => a.nev.localeCompare(b.nev,'hu')));
+  renderRoutePlan(lastVillages);
+}
+
 document.getElementById('village-tbody').addEventListener('click', (e) => {
+  const closeBtn = e.target.closest('.close-village-btn');
+  if(closeBtn){ e.preventDefault(); setVillageClosed(closeBtn.dataset.nev, true); return; }
+  const reopenBtn = e.target.closest('.reopen-village-btn');
+  if(reopenBtn){ e.preventDefault(); setVillageClosed(reopenBtn.dataset.nev, false); return; }
   const link = e.target.closest('.village-link');
   if(!link) return;
   e.preventDefault();
