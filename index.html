@@ -238,6 +238,7 @@
       <span><i class="dot" style="background:var(--amber)"></i>33–66%</span>
       <span><i class="dot" style="background:var(--green)"></i>66%+</span>
       <span><i class="dot" style="background:var(--teal-mid);opacity:.6"></i>egyedi ledobott flyer</span>
+      <span><i class="dot" style="background:var(--green);opacity:.5"></i>lefedett utca</span>
     </div>
   </div>
 
@@ -279,7 +280,7 @@ const STORAGE_FALVAK = 'cwt_tracker_falvak_url';
 const STORAGE_DROPS = 'cwt_tracker_drops_url';
 const TOTAL_TARGET = 5000;
 
-let map, villageLayer = L.layerGroup(), dropLayer = L.layerGroup();
+let map, villageLayer = L.layerGroup(), dropLayer = L.layerGroup(), routeLayer = L.layerGroup();
 
 function initMap(){
   map = L.map('map', {scrollWheelZoom:false}).setView([47.20, 16.13], 12);
@@ -287,8 +288,9 @@ function initMap(){
     attribution: '&copy; OpenStreetMap contributors',
     maxZoom: 19
   }).addTo(map);
-  villageLayer.addTo(map);
+  routeLayer.addTo(map);
   dropLayer.addTo(map);
+  villageLayer.addTo(map);
 }
 
 function parseCSV(text){
@@ -333,6 +335,100 @@ function haversine(lat1,lon1,lat2,lon2){
   return R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+async function renderRoute(routePoints){
+  routeLayer.clearLayers();
+  if(!routePoints.length) return;
+  let drewStreets = false;
+  try{
+    drewStreets = await colorCoveredStreets(routePoints);
+  }catch(e){
+    drewStreets = false;
+  }
+  if(!drewStreets){
+    drawFallbackRoute(routePoints);
+  }
+}
+
+function drawFallbackRoute(routePoints){
+  const timed = routePoints.filter(p => !isNaN(p.t)).sort((a,b) => a.t - b.t);
+  const GAP_MS = 10 * 60 * 1000;
+  const segments = [];
+  let current = [];
+  timed.forEach((p, i) => {
+    if(i > 0 && (p.t - timed[i-1].t) > GAP_MS){
+      if(current.length > 1) segments.push(current);
+      current = [];
+    }
+    current.push(p);
+  });
+  if(current.length > 1) segments.push(current);
+  segments.forEach(seg => {
+    L.polyline(seg.map(p => [p.lat, p.lon]), {
+      color: getComputedStyle(document.documentElement).getPropertyValue('--green').trim(),
+      weight: 7, opacity: .35, lineCap: 'round', lineJoin: 'round'
+    }).addTo(routeLayer);
+  });
+}
+
+function distPointToSegment(px,py,ax,ay,bx,by){
+  const dx = bx-ax, dy = by-ay;
+  const lenSq = dx*dx + dy*dy;
+  let t = lenSq ? ((px-ax)*dx + (py-ay)*dy) / lenSq : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t*dx, cy = ay + t*dy;
+  return Math.hypot(px-cx, py-cy);
+}
+
+async function colorCoveredStreets(routePoints){
+  if(!routePoints.length) return false;
+  let minLat=90, maxLat=-90, minLon=180, maxLon=-180;
+  routePoints.forEach(p => {
+    if(p.lat<minLat) minLat=p.lat;
+    if(p.lat>maxLat) maxLat=p.lat;
+    if(p.lon<minLon) minLon=p.lon;
+    if(p.lon>maxLon) maxLon=p.lon;
+  });
+  const buf = 0.003;
+  minLat-=buf; maxLat+=buf; minLon-=buf; maxLon+=buf;
+
+  const query = `[out:json][timeout:20];way["highway"](${minLat},${minLon},${maxLat},${maxLon});out geom;`;
+  const res = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST',
+    body: 'data=' + encodeURIComponent(query)
+  });
+  if(!res.ok) throw new Error('Overpass hiba');
+  const data = await res.json();
+  const ways = (data.elements||[]).filter(el => el.type==='way' && el.geometry && el.geometry.length>1);
+  if(!ways.length) return false;
+
+  const refLat = (minLat+maxLat)/2;
+  const mPerDegLat = 111320;
+  const mPerDegLon = 111320 * Math.cos(refLat*Math.PI/180);
+  const toXY = (lat,lon) => [lon*mPerDegLon, lat*mPerDegLat];
+  const ptsXY = routePoints.map(p => toXY(p.lat,p.lon));
+  const THRESH = 25;
+
+  let drewAny = false;
+  ways.forEach(way => {
+    const nodesXY = way.geometry.map(n => toXY(n.lat,n.lon));
+    let covered = false;
+    for(let i=0; i<nodesXY.length-1 && !covered; i++){
+      const [ax,ay] = nodesXY[i], [bx,by] = nodesXY[i+1];
+      for(const [px,py] of ptsXY){
+        if(distPointToSegment(px,py,ax,ay,bx,by) < THRESH){ covered = true; break; }
+      }
+    }
+    if(covered){
+      L.polyline(way.geometry.map(n => [n.lat,n.lon]), {
+        color: getComputedStyle(document.documentElement).getPropertyValue('--green').trim(),
+        weight: 7, opacity: .5, lineCap: 'round', lineJoin: 'round'
+      }).addTo(routeLayer);
+      drewAny = true;
+    }
+  });
+  return drewAny;
+}
+
 function colorFor(pct){
   if(pct >= 66) return getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
   if(pct >= 33) return getComputedStyle(document.documentElement).getPropertyValue('--amber').trim();
@@ -348,6 +444,7 @@ async function fetchCSV(url){
 function render(falvak, drops){
   villageLayer.clearLayers();
   dropLayer.clearLayers();
+  routeLayer.clearLayers();
 
   const villages = falvak.map(f => ({
     nev: colFind(f,'falu','village','name'),
@@ -358,6 +455,7 @@ function render(falvak, drops){
   })).filter(v => v.nev && !isNaN(v.lat) && !isNaN(v.lon));
 
   let totalKesz = 0;
+  const routePoints = [];
 
   drops.forEach(d => {
     const ort = colFind(d,'ort','hely','location');
@@ -367,8 +465,12 @@ function render(falvak, drops){
     const count = parseFloat(colFind(d,'flyer','db','count')) || 1;
     totalKesz += count;
 
+    const zeitStr = colFind(d,'zeit','ido','idő','time');
+    const t = Date.parse((zeitStr||'').replace(' ','T'));
+    routePoints.push({lat, lon, t});
+
     L.circleMarker([lat,lon], {
-      radius:3, weight:0, fillOpacity:.55,
+      radius:4, weight:1, color:'#fff', fillOpacity:.75,
       fillColor: getComputedStyle(document.documentElement).getPropertyValue('--teal-mid').trim()
     }).addTo(dropLayer);
 
@@ -381,6 +483,8 @@ function render(falvak, drops){
       nearest.kesz += count;
     }
   });
+
+  renderRoute(routePoints);
 
   const tbody = document.getElementById('village-tbody');
   tbody.innerHTML = '';
