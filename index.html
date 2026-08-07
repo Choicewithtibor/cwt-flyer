@@ -273,6 +273,7 @@
       <div class="status" id="status-line"></div>
       <div class="hint">
         A linkeket a Google Sheet-ben: Fájl → Megosztás → Közzététel a weben → az adott fül kiválasztása → CSV formátum. A böngésző elmenti a linkeket (localStorage), nem kell újra beírni.<br>
+        Az oldal percenként csendben ellenőrzi, van-e új adat a Sheetben, és ha igen, magától frissíti a térképet – nem kell F5.<br>
         <strong>Falvak fül oszlopai:</strong> Falu | Lat | Lon | Cél<br>
         <strong>Drops fül oszlopai:</strong> Zeit | Flyer | Ort | Notiz (a FlyerTracker exportot közvetlenül ide másold be)
       </div>
@@ -289,6 +290,9 @@ const TOTAL_TARGET = 5000;
 
 let map, villageLayer = L.layerGroup(), dropLayer = L.layerGroup(), routeLayer = L.layerGroup();
 let villageMarkers = {};
+let hasFitBounds = false;
+let lastDataSignature = '';
+const POLL_MS = 60000;
 
 function initMap(){
   map = L.map('map', {scrollWheelZoom:false}).setView([47.20, 16.13], 12);
@@ -446,10 +450,10 @@ function colorFor(pct){
   return getComputedStyle(document.documentElement).getPropertyValue('--red').trim();
 }
 
-async function fetchCSV(url){
+async function fetchText(url){
   const res = await fetch(url);
   if(!res.ok) throw new Error('Nem sikerült betölteni: ' + url);
-  return parseCSV(await res.text());
+  return res.text();
 }
 
 function render(falvak, drops){
@@ -524,7 +528,7 @@ function render(falvak, drops){
     tbody.appendChild(tr);
   });
 
-  if(bounds.length) map.fitBounds(bounds, {padding:[30,30]});
+  if(bounds.length && !hasFitBounds){ map.fitBounds(bounds, {padding:[30,30]}); hasFitBounds = true; }
 
   const overallPct = Math.round((totalKesz / TOTAL_TARGET) * 100);
   document.getElementById('summary-count').textContent = `${totalKesz.toLocaleString('hu-HU')} / ${TOTAL_TARGET.toLocaleString('hu-HU')} db`;
@@ -532,22 +536,35 @@ function render(falvak, drops){
   document.getElementById('summary-fill').style.width = Math.min(overallPct,100) + '%';
 }
 
-async function loadFromSheets(){
+async function loadFromSheets(silent){
   const falvakUrl = localStorage.getItem(STORAGE_FALVAK);
   const dropsUrl = localStorage.getItem(STORAGE_DROPS);
   const status = document.getElementById('status-line');
   if(!falvakUrl || !dropsUrl){
-    status.textContent = 'Add meg mindkét linket, majd kattints a Mentésre.';
+    if(!silent) status.textContent = 'Add meg mindkét linket, majd kattints a Mentésre.';
     return;
   }
-  status.textContent = 'Frissítés...';
+  if(!silent) status.textContent = 'Frissítés...';
   try{
-    const [falvak, drops] = await Promise.all([fetchCSV(falvakUrl), fetchCSV(dropsUrl)]);
-    render(falvak, drops);
+    const [falvakText, dropsText] = await Promise.all([fetchText(falvakUrl), fetchText(dropsUrl)]);
+    const signature = falvakText.length + ':' + dropsText.length + ':' + falvakText.slice(-200) + dropsText.slice(-200);
+    if(silent && signature === lastDataSignature){
+      status.textContent = 'Nincs új adat · legutóbb ellenőrizve: ' + new Date().toLocaleTimeString('hu-HU');
+      return;
+    }
+    lastDataSignature = signature;
+    render(parseCSV(falvakText), parseCSV(dropsText));
     status.textContent = 'Frissítve: ' + new Date().toLocaleString('hu-HU');
   }catch(e){
-    status.textContent = 'Hiba történt: ' + e.message;
+    if(!silent) status.textContent = 'Hiba történt: ' + e.message;
   }
+}
+
+let autoRefreshStarted = false;
+function startAutoRefresh(){
+  if(autoRefreshStarted) return;
+  autoRefreshStarted = true;
+  setInterval(() => loadFromSheets(true), POLL_MS);
 }
 
 function loadDemo(){
@@ -573,6 +590,7 @@ document.getElementById('save-btn').addEventListener('click', () => {
   localStorage.setItem(STORAGE_FALVAK, document.getElementById('falvak-url').value.trim());
   localStorage.setItem(STORAGE_DROPS, document.getElementById('drops-url').value.trim());
   loadFromSheets();
+  startAutoRefresh();
 });
 document.getElementById('demo-btn').addEventListener('click', loadDemo);
 
@@ -596,6 +614,7 @@ window.addEventListener('DOMContentLoaded', () => {
   if(savedFalvak && savedDrops){
     document.getElementById('settings-details').open = false;
     loadFromSheets();
+    startAutoRefresh();
   } else {
     document.getElementById('settings-details').open = true;
     loadDemo();
