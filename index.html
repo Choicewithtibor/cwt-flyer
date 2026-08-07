@@ -272,7 +272,7 @@
       </div>
       <div class="status" id="status-line"></div>
       <div class="hint">
-        A linkeket a Google Sheet-ben: Fájl → Megosztás → Közzététel a weben → az adott fül kiválasztása → CSV formátum. A böngésző elmenti a linkeket (localStorage), nem kell újra beírni.<br>
+        A fenti linkek már be vannak drótozva az oldalba, minden eszközön automatikusan működnek – nem kell semmit beírnod, ez a panel csak akkor kell, ha valaha másik Sheet-re váltanátok.<br>
         Az oldal percenként csendben ellenőrzi, van-e új adat a Sheetben, és ha igen, magától frissíti a térképet – nem kell F5.<br>
         <strong>Falvak fül oszlopai:</strong> Falu | Lat | Lon | Cél<br>
         <strong>Drops fül oszlopai:</strong> Zeit | Flyer | Ort | Notiz (a FlyerTracker exportot közvetlenül ide másold be)
@@ -287,6 +287,8 @@
 const STORAGE_FALVAK = 'cwt_tracker_falvak_url';
 const STORAGE_DROPS = 'cwt_tracker_drops_url';
 const TOTAL_TARGET = 5000;
+const DEFAULT_FALVAK_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQMo_49VBnvBA-0hWq0a2pFxeFV_JTBncKY_7K9syRE7Htq0GltLYBuQ84dZu_RYh7BpVuZkFPXsGF-/pub?gid=603047761&single=true&output=csv';
+const DEFAULT_DROPS_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQMo_49VBnvBA-0hWq0a2pFxeFV_JTBncKY_7K9syRE7Htq0GltLYBuQ84dZu_RYh7BpVuZkFPXsGF-/pub?gid=1804916497&single=true&output=csv';
 
 let map, villageLayer = L.layerGroup(), dropLayer = L.layerGroup(), routeLayer = L.layerGroup();
 let villageMarkers = {};
@@ -537,13 +539,9 @@ function render(falvak, drops){
 }
 
 async function loadFromSheets(silent){
-  const falvakUrl = localStorage.getItem(STORAGE_FALVAK);
-  const dropsUrl = localStorage.getItem(STORAGE_DROPS);
+  const falvakUrl = localStorage.getItem(STORAGE_FALVAK) || DEFAULT_FALVAK_URL;
+  const dropsUrl = localStorage.getItem(STORAGE_DROPS) || DEFAULT_DROPS_URL;
   const status = document.getElementById('status-line');
-  if(!falvakUrl || !dropsUrl){
-    if(!silent) status.textContent = 'Add meg mindkét linket, majd kattints a Mentésre.';
-    return;
-  }
   if(!silent) status.textContent = 'Frissítés...';
   try{
     const [falvakText, dropsText] = await Promise.all([fetchText(falvakUrl), fetchText(dropsUrl)]);
@@ -607,18 +605,11 @@ document.getElementById('village-tbody').addEventListener('click', (e) => {
 
 window.addEventListener('DOMContentLoaded', () => {
   initMap();
-  const savedFalvak = localStorage.getItem(STORAGE_FALVAK);
-  const savedDrops = localStorage.getItem(STORAGE_DROPS);
-  if(savedFalvak) document.getElementById('falvak-url').value = savedFalvak;
-  if(savedDrops) document.getElementById('drops-url').value = savedDrops;
-  if(savedFalvak && savedDrops){
-    document.getElementById('settings-details').open = false;
-    loadFromSheets();
-    startAutoRefresh();
-  } else {
-    document.getElementById('settings-details').open = true;
-    loadDemo();
-  }
+  document.getElementById('falvak-url').value = localStorage.getItem(STORAGE_FALVAK) || DEFAULT_FALVAK_URL;
+  document.getElementById('drops-url').value = localStorage.getItem(STORAGE_DROPS) || DEFAULT_DROPS_URL;
+  document.getElementById('settings-details').open = false;
+  loadFromSheets();
+  startAutoRefresh();
 });
 </script>
 
