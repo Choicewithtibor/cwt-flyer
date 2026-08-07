@@ -123,12 +123,19 @@
     vertical-align:middle;
   }
   .mini-fill{
+    display:block;
     height:100%;
     border-radius:999px;
   }
   .pct{
     font-weight:700;
     font-variant-numeric:tabular-nums;
+  }
+  .village-link{
+    color:var(--teal);
+    font-weight:700;
+    text-decoration:underline;
+    cursor:pointer;
   }
   details{
     margin-bottom:20px;
@@ -281,6 +288,7 @@ const STORAGE_DROPS = 'cwt_tracker_drops_url';
 const TOTAL_TARGET = 5000;
 
 let map, villageLayer = L.layerGroup(), dropLayer = L.layerGroup(), routeLayer = L.layerGroup();
+let villageMarkers = {};
 
 function initMap(){
   map = L.map('map', {scrollWheelZoom:false}).setView([47.20, 16.13], 12);
@@ -406,24 +414,27 @@ async function colorCoveredStreets(routePoints){
   const mPerDegLon = 111320 * Math.cos(refLat*Math.PI/180);
   const toXY = (lat,lon) => [lon*mPerDegLon, lat*mPerDegLat];
   const ptsXY = routePoints.map(p => toXY(p.lat,p.lon));
-  const THRESH = 25;
+  const THRESH = 20;
+  const greenColor = getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
 
   let drewAny = false;
   ways.forEach(way => {
     const nodesXY = way.geometry.map(n => toXY(n.lat,n.lon));
-    let covered = false;
-    for(let i=0; i<nodesXY.length-1 && !covered; i++){
+    for(let i=0; i<nodesXY.length-1; i++){
       const [ax,ay] = nodesXY[i], [bx,by] = nodesXY[i+1];
+      let covered = false;
       for(const [px,py] of ptsXY){
         if(distPointToSegment(px,py,ax,ay,bx,by) < THRESH){ covered = true; break; }
       }
-    }
-    if(covered){
-      L.polyline(way.geometry.map(n => [n.lat,n.lon]), {
-        color: getComputedStyle(document.documentElement).getPropertyValue('--green').trim(),
-        weight: 7, opacity: .5, lineCap: 'round', lineJoin: 'round'
-      }).addTo(routeLayer);
-      drewAny = true;
+      if(covered){
+        L.polyline([
+          [way.geometry[i].lat, way.geometry[i].lon],
+          [way.geometry[i+1].lat, way.geometry[i+1].lon]
+        ], {
+          color: greenColor, weight: 7, opacity: .5, lineCap: 'round', lineJoin: 'round'
+        }).addTo(routeLayer);
+        drewAny = true;
+      }
     }
   });
   return drewAny;
@@ -489,6 +500,7 @@ function render(falvak, drops){
   const tbody = document.getElementById('village-tbody');
   tbody.innerHTML = '';
   document.getElementById('table-empty').style.display = villages.length ? 'none' : 'block';
+  villageMarkers = {};
 
   const bounds = [];
   villages.sort((a,b) => a.nev.localeCompare(b.nev,'hu')).forEach(v => {
@@ -496,13 +508,14 @@ function render(falvak, drops){
     const color = colorFor(pct);
     bounds.push([v.lat, v.lon]);
 
-    L.circleMarker([v.lat, v.lon], {
+    const marker = L.circleMarker([v.lat, v.lon], {
       radius:15, weight:2, color:'#fff', fillColor:color, fillOpacity:.9
     }).bindPopup(`<strong>${v.nev}</strong><br>${v.kesz} / ${v.cel} db (${pct}%)`).addTo(villageLayer);
+    villageMarkers[v.nev] = marker;
 
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${v.nev}</td>
+      <td><a href="#" class="village-link" data-nev="${v.nev}">${v.nev}</a></td>
       <td>${v.cel || '–'}</td>
       <td>${v.kesz}</td>
       <td><span class="pct" style="color:${color}">${pct}%</span></td>
@@ -562,6 +575,17 @@ document.getElementById('save-btn').addEventListener('click', () => {
   loadFromSheets();
 });
 document.getElementById('demo-btn').addEventListener('click', loadDemo);
+
+document.getElementById('village-tbody').addEventListener('click', (e) => {
+  const link = e.target.closest('.village-link');
+  if(!link) return;
+  e.preventDefault();
+  const marker = villageMarkers[link.dataset.nev];
+  if(marker){
+    map.setView(marker.getLatLng(), 16);
+    marker.openPopup();
+  }
+});
 
 window.addEventListener('DOMContentLoaded', () => {
   initMap();
